@@ -18,8 +18,10 @@ from __future__ import annotations
 import asyncio
 import datetime
 import io
+import json
 import logging
 import math
+import typing
 from dataclasses import dataclass
 
 import aiohttp
@@ -35,11 +37,15 @@ from custom_components.meteoswiss.const import DOMAIN, USER_AGENT
 
 _LOGGER = logging.getLogger(__name__)
 
-BASE_URL = "https://data.geo.admin.ch/{collection}/{t:%Y%m%d}-ch/{file}"
+BASE_URL = "https://data.geo.admin.ch/{collection}/{day}/{name}"
+ITEM_URL = "https://data.geo.admin.ch/api/stac/v1/collections/{collection}/items/{day}"
 SLOT = datetime.timedelta(minutes=5)
 # How often to look for new images.  Only a new image is downloaded
 # (20 to 30 kB); a look for one that is not out yet is a single 403.
 POLL_INTERVAL = datetime.timedelta(minutes=1)
+# An image still missing this long after its usual delay is looked up in
+# the day's index, in case its name carries an unusual variant.
+OVERDUE = datetime.timedelta(minutes=2)
 # Past this age a reading is no longer "now", so its sensor goes
 # unavailable instead of repeating it.
 MAX_AGE = datetime.timedelta(minutes=20)
@@ -47,11 +53,19 @@ MAX_AGE = datetime.timedelta(minutes=20)
 
 @dataclass(frozen=True)
 class RadarProduct:
-    """One radar product, one file per 5-minute interval."""
+    """One radar product, one file per 5-minute interval.
+
+    A file is named stem + variant + ext.  The stem carries the product
+    and the end of the interval (t, and doy its day of the year).  The
+    variant is usually the default, but it encodes how the image was
+    made - for RZC which radars contributed, "vl" meaning all of them -
+    so it changes while a radar is out, for hours at a time.
+    """
 
     collection: str
-    # File name; t is the end of the interval, doy its day of the year.
-    file: str
+    stem: str
+    variant: str
+    ext: str
     # Images appear this long after their interval ends, give or take.
     delay: datetime.timedelta
     # Multiplier from the value stored in the file to the sensor's unit.
@@ -65,19 +79,25 @@ HAIL_SIZE = "hail_size"
 PRODUCTS: dict[str, RadarProduct] = {
     PRECIPITATION: RadarProduct(
         collection="ch.meteoschweiz.ogd-radar-precip",
-        file="rzc{t:%y}{doy:03d}{t:%H%M}vl.001.h5",
+        stem="rzc{t:%y}{doy:03d}{t:%H%M}",
+        variant="vl",
+        ext=".001.h5",
         delay=datetime.timedelta(seconds=30),
     ),
     HAIL_PROBABILITY: RadarProduct(
         collection="ch.meteoschweiz.ogd-radar-hail",
-        file="bzc{t:%y}{doy:03d}{t:%H%M}vl.845.h5",
+        stem="bzc{t:%y}{doy:03d}{t:%H%M}",
+        variant="vl",
+        ext=".845.h5",
         delay=datetime.timedelta(seconds=30),
         # Stored as a fraction, 0 to 1.
         scale=100.0,
     ),
     HAIL_SIZE: RadarProduct(
         collection="ch.meteoschweiz.ogd-radar-hail",
-        file="mzc{t:%y}{doy:03d}{t:%H%M}vl.850.h5",
+        stem="mzc{t:%y}{doy:03d}{t:%H%M}",
+        variant="vl",
+        ext=".850.h5",
         delay=datetime.timedelta(seconds=30),
     ),
 }
@@ -115,15 +135,44 @@ def latest_slot(product: RadarProduct, now: datetime.datetime) -> datetime.datet
     return t.replace(minute=t.minute - t.minute % 5, second=0, microsecond=0)
 
 
-def radar_url(product: RadarProduct, slot: datetime.datetime) -> str:
-    """Return the URL of the image for the interval ending at slot."""
+def day_of(slot: datetime.datetime) -> str:
+    """Return the id of the daily item holding the image for slot."""
+    return f"{slot.astimezone(datetime.UTC):%Y%m%d}-ch"
+
+
+def stem_of(product: RadarProduct, slot: datetime.datetime) -> str:
+    """Return the start of the file name of the image for slot."""
     t = slot.astimezone(datetime.UTC)
-    doy = t.timetuple().tm_yday
+    return product.stem.format(t=t, doy=t.timetuple().tm_yday)
+
+
+def radar_url(product: RadarProduct, slot: datetime.datetime, variant: str) -> str:
+    """Return the URL of the image for the interval ending at slot."""
     return BASE_URL.format(
         collection=product.collection,
-        t=t,
-        file=product.file.format(t=t, doy=doy),
+        day=day_of(slot),
+        name=stem_of(product, slot) + variant + product.ext,
     )
+
+
+def find_in_item(
+    product: RadarProduct,
+    slot: datetime.datetime,
+    assets: dict[str, typing.Any],
+) -> tuple[str, str] | None:
+    """Return (variant, href) of the image for slot in a daily item's assets.
+
+    Where an interval was published twice, the later file wins.
+    """
+    stem = stem_of(product, slot)
+    found = sorted(
+        (asset.get("created", ""), name[len(stem) : -len(product.ext)], asset["href"])
+        for name, asset in assets.items()
+        if name.startswith(stem) and name.endswith(product.ext)
+    )
+    if not found:
+        return None
+    return found[-1][1], found[-1][2]
 
 
 def read_pixel(content: bytes, lat: float, lon: float) -> float | None:
@@ -177,6 +226,14 @@ class MeteoSwissRadarCoordinator(DataUpdateCoordinator[dict[str, RadarReading]])
         """Initialize."""
         self.lat = lat
         self.lon = lon
+        # The variant each product's last image was found under.
+        self._variants = {key: product.variant for key, product in PRODUCTS.items()}
+        # (product, slot) pairs already looked up in the index, so an image
+        # that is simply late costs one index download, not one per poll.
+        self._looked_up: set[tuple[str, datetime.datetime]] = set()
+        # Daily items fetched during the current update, shared by the
+        # products of one collection.
+        self._items: dict[tuple[str, str], asyncio.Task[dict[str, typing.Any]]] = {}
         super().__init__(
             hass,
             _LOGGER,
@@ -185,7 +242,7 @@ class MeteoSwissRadarCoordinator(DataUpdateCoordinator[dict[str, RadarReading]])
         )
 
     async def _fetch(self, url: str) -> bytes | None:
-        """Download one image, or None if it has not been published yet."""
+        """Download one file, or None if it does not exist (yet)."""
         session = async_get_clientsession(self.hass)
         async with asyncio.timeout(15):
             async with session.get(url, headers={"User-Agent": USER_AGENT}) as resp:
@@ -195,13 +252,59 @@ class MeteoSwissRadarCoordinator(DataUpdateCoordinator[dict[str, RadarReading]])
                 resp.raise_for_status()
                 return await resp.read()
 
+    async def _item_assets(self, collection: str, day: str) -> dict[str, typing.Any]:
+        """Return the assets of a daily item, fetched once per update."""
+        key = (collection, day)
+        if key not in self._items:
+
+            async def fetch() -> dict[str, typing.Any]:
+                content = await self._fetch(
+                    ITEM_URL.format(collection=collection, day=day)
+                )
+                return json.loads(content)["assets"] if content else {}
+
+            self._items[key] = asyncio.ensure_future(fetch())
+        return await self._items[key]
+
+    async def _fetch_image(
+        self,
+        key: str,
+        product: RadarProduct,
+        slot: datetime.datetime,
+        now: datetime.datetime,
+    ) -> bytes | None:
+        """Download the image for slot, or None if it is not out (yet)."""
+        tried = []
+        for variant in dict.fromkeys((self._variants[key], product.variant)):
+            tried.append(variant)
+            content = await self._fetch(radar_url(product, slot, variant))
+            if content is not None:
+                self._variants[key] = variant
+                return content
+
+        # Not under the usual names.  Once it is overdue, ask the index -
+        # the listing is ~300 kB by the end of the day, so only then.
+        overdue = now - slot > product.delay + OVERDUE
+        if not overdue or (key, slot) in self._looked_up:
+            return None
+        self._looked_up.add((key, slot))
+        assets = await self._item_assets(product.collection, day_of(slot))
+        found = find_in_item(product, slot, assets)
+        if found is None:
+            return None
+        variant, href = found
+        _LOGGER.debug("Radar %s %s is published as variant %s", key, slot, variant)
+        self._variants[key] = variant
+        return await self._fetch(href)
+
     async def _update_product(
         self,
-        product: RadarProduct,
+        key: str,
         current: RadarReading | None,
         now: datetime.datetime,
     ) -> RadarReading | None:
         """Return the newest reading of one product, or None if none is fresh."""
+        product = PRODUCTS[key]
         newest = latest_slot(product, now)
         if current is not None and current.time >= newest:
             return current
@@ -212,9 +315,8 @@ class MeteoSwissRadarCoordinator(DataUpdateCoordinator[dict[str, RadarReading]])
         for slot in (newest, newest - SLOT):
             if current is not None and slot <= current.time:
                 break
-            url = radar_url(product, slot)
             try:
-                content = await self._fetch(url)
+                content = await self._fetch_image(key, product, slot, now)
                 if content is None:
                     continue
                 value = await self.hass.async_add_executor_job(
@@ -225,11 +327,11 @@ class MeteoSwissRadarCoordinator(DataUpdateCoordinator[dict[str, RadarReading]])
                 )
             except (TimeoutError, aiohttp.ClientError) as exc:
                 if fresh is None:
-                    raise UpdateFailed(f"Cannot fetch {url}: {exc}") from exc
-                _LOGGER.debug("Cannot fetch %s: %s", url, exc)
+                    raise UpdateFailed(f"Cannot fetch radar {key}: {exc}") from exc
+                _LOGGER.debug("Cannot fetch radar %s: %s", key, exc)
                 return fresh
             except Exception as exc:
-                raise UpdateFailed(f"Cannot read {url}: {exc}") from exc
+                raise UpdateFailed(f"Cannot read radar {key}: {exc}") from exc
             if value is not None:
                 value = round(value * product.scale, 2)
             return RadarReading(time=slot, value=value)
@@ -240,11 +342,12 @@ class MeteoSwissRadarCoordinator(DataUpdateCoordinator[dict[str, RadarReading]])
         now = dt_util.utcnow()
         previous = self.data or {}
         keys = list(PRODUCTS)
+        self._items = {}
+        self._looked_up = {
+            (key, slot) for key, slot in self._looked_up if now - slot < MAX_AGE
+        }
         results = await asyncio.gather(
-            *(
-                self._update_product(PRODUCTS[key], previous.get(key), now)
-                for key in keys
-            ),
+            *(self._update_product(key, previous.get(key), now) for key in keys),
             return_exceptions=True,
         )
 
