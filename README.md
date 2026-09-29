@@ -196,7 +196,7 @@ That one is very useful to retract awnings and other smart home activities.
 
 ## Radar sensors
 
-Every configured location gets three sensors from the MeteoSwiss weather
+Every configured location gets four sensors from the MeteoSwiss weather
 radar, each read from the 1 km square containing the location and updated
 every 5 minutes, usually no more than 1 to 2 minutes behind the weather:
 
@@ -207,9 +207,16 @@ every 5 minutes, usually no more than 1 to 2 minutes behind the weather:
   (product POH).
 * `<forecast name> radar hail size`: the maximum expected hail size in mm
   (product MESHS).  It is 0 unless hail of at least 20 mm is expected.
+* `<forecast name> radar precipitation last hour`: the rain in mm that
+  fell over the last 60 minutes (product CombiPrecip).  This is the radar
+  adjusted to the rain gauge network, so it is the best estimate of how
+  much rain actually reached the ground at your location - for watering
+  decisions, say.  It is a rolling total that updates every 5 minutes and
+  lags about 5 minutes behind; the rain rate sensor is the one to use for
+  "has it started raining".
 
-The `observation_time` attribute is the end of the 5-minute interval that
-the value covers.  A sensor goes unavailable when its product has not
+The `observation_time` attribute is the end of the interval that the
+value covers (5 minutes, or 60 for the last-hour total).  A sensor goes unavailable when its product has not
 published a new image for 20 minutes.
 
 A radar sees what is in the air above you, not what reaches the ground:
@@ -232,8 +239,8 @@ template:
 
 The location is the one you confirmed when setting up the integration
 (entries created before these sensors existed use the Home Assistant home
-location).  Each new radar image is downloaded once, 20 to 30 kB per
-product every 5 minutes.  Disabling all three sensors stops the downloads.
+location).  Each new radar image is downloaded once, 20 to 40 kB per
+product every 5 minutes.  Disabling all four sensors stops the downloads.
 
 ## Troubleshooting
   
@@ -287,7 +294,7 @@ logger:
 Data comes from the MeteoSwiss official data sources.
 Forecasts are extracted from the MeteoSwiss API.
 Current conditions are from official data files.
-Radar sensors read the RZC, POH and MESHS products of the MeteoSwiss open
+Radar sensors read the RZC, POH, MESHS and CombiPrecip products of the MeteoSwiss open
 data (https://opendatadocs.meteoswiss.ch/d-radar-data).
 
 A primer on Swiss weather stations can be found at https://rudd-o.com/meteostations .

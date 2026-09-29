@@ -9,6 +9,10 @@ ends.  That is much faster than any station feed.  The products read here:
   signal available.
 - POH, the probability of hail, and MESHS, the maximum expected hail size,
   which is only ever reported from 20 mm up.
+- CombiPrecip, the rain that fell in the last 60 minutes in mm: the radar
+  adjusted to the rain gauges, so the best estimate of how much actually
+  reached the ground here.  It comes about 4.5 minutes after its hour
+  ends, and a new one every 5 minutes.
 
 See https://opendatadocs.meteoswiss.ch/d-radar-data
 """
@@ -75,6 +79,7 @@ class RadarProduct:
 PRECIPITATION = "precipitation"
 HAIL_PROBABILITY = "hail_probability"
 HAIL_SIZE = "hail_size"
+PRECIPITATION_LAST_HOUR = "precipitation_last_hour"
 
 PRODUCTS: dict[str, RadarProduct] = {
     PRECIPITATION: RadarProduct(
@@ -99,6 +104,14 @@ PRODUCTS: dict[str, RadarProduct] = {
         variant="vl",
         ext=".850.h5",
         delay=datetime.timedelta(seconds=30),
+    ),
+    PRECIPITATION_LAST_HOUR: RadarProduct(
+        collection="ch.meteoschweiz.ogd-radar-precip",
+        stem="cpc{t:%y}{doy:03d}{t:%H%M}",
+        # A digit, "0" in 9 files out of 10.
+        variant="0",
+        ext="_00060.001.h5",
+        delay=datetime.timedelta(minutes=4),
     ),
 }
 
@@ -201,7 +214,7 @@ def read_pixel(content: bytes, lat: float, lon: float) -> float | None:
         )
 
     value = float(f["dataset1/data1/data"][row, col])
-    if math.isnan(value):
+    if not math.isfinite(value):
         return None
     return value
 

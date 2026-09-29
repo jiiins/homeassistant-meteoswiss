@@ -15,6 +15,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
     UnitOfLength,
+    UnitOfPrecipitationDepth,
     UnitOfVolumetricFlux,
 )
 from homeassistant.core import HomeAssistant, callback
@@ -42,6 +43,7 @@ from custom_components.meteoswiss.radar import (
     HAIL_PROBABILITY,
     HAIL_SIZE,
     PRECIPITATION,
+    PRECIPITATION_LAST_HOUR,
     MeteoSwissRadarCoordinator,
 )
 
@@ -214,6 +216,15 @@ RADAR_SENSORS = (
         name="radar hail size",
         icon="mdi:weather-hail",
         native_unit_of_measurement=UnitOfLength.MILLIMETERS,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    # A rolling 60-minute total, not a counter: MEASUREMENT, not TOTAL.
+    SensorEntityDescription(
+        key=PRECIPITATION_LAST_HOUR,
+        name="radar precipitation last hour",
+        icon="mdi:weather-pouring",
+        device_class=SensorDeviceClass.PRECIPITATION,
+        native_unit_of_measurement=UnitOfPrecipitationDepth.MILLIMETERS,
         state_class=SensorStateClass.MEASUREMENT,
     ),
 )
