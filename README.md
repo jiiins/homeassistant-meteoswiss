@@ -15,8 +15,8 @@ This is the MeteoSwiss integration for Home Assistant.
 * Supports two different real-time stations: a weather station
   that may not give you rain data, and a precipitation station
   that will give you rain data but may not give you other info.
-* Provides the current rain rate from the MeteoSwiss weather radar at
-  your location (see below).
+* Provides the current rain rate and hail risk from the MeteoSwiss
+  weather radar at your location (see below).
 * Code is much cleaner and works properly.
 
 See below for common issues.
@@ -194,20 +194,27 @@ template:
 
 That one is very useful to retract awnings and other smart home activities.
 
-## Radar precipitation sensor
+## Radar sensors
 
-Every configured location gets a `<forecast name> radar precipitation`
-sensor: the rain rate in mm/h that the MeteoSwiss radar composite (RZC)
-measures over the 1 km square containing the location.  It updates every
-5 minutes and is usually no more than 1 to 2 minutes behind the rain,
-against 10 to 25 minutes for a precipitation station, so it is the fastest
-way for an automation to learn that rain has started.  The
-`observation_time` attribute is the end of the 5-minute interval that the
-value covers.
+Every configured location gets three sensors from the MeteoSwiss weather
+radar, each read from the 1 km square containing the location and updated
+every 5 minutes, usually no more than 1 to 2 minutes behind the weather:
 
-A radar sees rain in the air above you, not on the ground: very light
-drizzle can read 0, and rain that evaporates before landing can read
-above 0.  To act on it, use a threshold, for example:
+* `<forecast name> radar precipitation`: the rain rate in mm/h (product
+  RZC).  A precipitation station reports 10 to 25 minutes late, so this is
+  the fastest way for an automation to learn that rain has started.
+* `<forecast name> radar hail probability`: the probability of hail in %
+  (product POH).
+* `<forecast name> radar hail size`: the maximum expected hail size in mm
+  (product MESHS).  It is 0 unless hail of at least 20 mm is expected.
+
+The `observation_time` attribute is the end of the 5-minute interval that
+the value covers.  A sensor goes unavailable when its product has not
+published a new image for 20 minutes.
+
+A radar sees what is in the air above you, not what reaches the ground:
+very light drizzle can read 0, and rain that evaporates before landing can
+read above 0.  To act on it, use a threshold, for example:
 
 ```yaml
 template:
@@ -218,12 +225,15 @@ template:
           minutes: 15
         state: >
           {{ states('sensor.home_radar_precipitation') | float(0) >= 0.1 }}
+      - name: "Hail risk"
+        state: >
+          {{ states('sensor.home_radar_hail_probability') | float(0) >= 50 }}
 ```
 
 The location is the one you confirmed when setting up the integration
-(entries created before this sensor existed use the Home Assistant home
-location).  Each new radar image is downloaded once, about 30 kB every
-5 minutes.  Disabling the sensor stops the downloads.
+(entries created before these sensors existed use the Home Assistant home
+location).  Each new radar image is downloaded once, 20 to 30 kB per
+product every 5 minutes.  Disabling all three sensors stops the downloads.
 
 ## Troubleshooting
   
@@ -277,8 +287,8 @@ logger:
 Data comes from the MeteoSwiss official data sources.
 Forecasts are extracted from the MeteoSwiss API.
 Current conditions are from official data files.
-Radar precipitation is the RZC product of the MeteoSwiss open data
-(https://opendatadocs.meteoswiss.ch/d-radar-data/d1-precipitation-radar-products).
+Radar sensors read the RZC, POH and MESHS products of the MeteoSwiss open
+data (https://opendatadocs.meteoswiss.ch/d-radar-data).
 
 A primer on Swiss weather stations can be found at https://rudd-o.com/meteostations .
 Information on the provided values is available at
