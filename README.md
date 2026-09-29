@@ -15,6 +15,8 @@ This is the MeteoSwiss integration for Home Assistant.
 * Supports two different real-time stations: a weather station
   that may not give you rain data, and a precipitation station
   that will give you rain data but may not give you other info.
+* Provides the current rain rate from the MeteoSwiss weather radar at
+  your location (see below).
 * Code is much cleaner and works properly.
 
 See below for common issues.
@@ -192,6 +194,37 @@ template:
 
 That one is very useful to retract awnings and other smart home activities.
 
+## Radar precipitation sensor
+
+Every configured location gets a `<forecast name> radar precipitation`
+sensor: the rain rate in mm/h that the MeteoSwiss radar composite (RZC)
+measures over the 1 km square containing the location.  It updates every
+5 minutes and is usually no more than 1 to 2 minutes behind the rain,
+against 10 to 25 minutes for a precipitation station, so it is the fastest
+way for an automation to learn that rain has started.  The
+`observation_time` attribute is the end of the 5-minute interval that the
+value covers.
+
+A radar sees rain in the air above you, not on the ground: very light
+drizzle can read 0, and rain that evaporates before landing can read
+above 0.  To act on it, use a threshold, for example:
+
+```yaml
+template:
+  - binary_sensor:
+      - name: "Raining"
+        device_class: moisture
+        delay_off:
+          minutes: 15
+        state: >
+          {{ states('sensor.home_radar_precipitation') | float(0) >= 0.1 }}
+```
+
+The location is the one you confirmed when setting up the integration
+(entries created before this sensor existed use the Home Assistant home
+location).  Each new radar image is downloaded once, about 30 kB every
+5 minutes.  Disabling the sensor stops the downloads.
+
 ## Troubleshooting
   
 In case of problem with the integration, please open an issue on
@@ -244,6 +277,8 @@ logger:
 Data comes from the MeteoSwiss official data sources.
 Forecasts are extracted from the MeteoSwiss API.
 Current conditions are from official data files.
+Radar precipitation is the RZC product of the MeteoSwiss open data
+(https://opendatadocs.meteoswiss.ch/d-radar-data/d1-precipitation-radar-products).
 
 A primer on Swiss weather stations can be found at https://rudd-o.com/meteostations .
 Information on the provided values is available at
@@ -254,7 +289,8 @@ Information on the provided values is available at
 This integration uses:
 
 * https://nominatim.openstreetmap.org to guess your post code
-* https://data.geo.admin.ch/ for current weather conditions
+* https://data.geo.admin.ch/ for current weather conditions and radar
+  images
 * https://www.meteosuisse.admin.ch for forecast
 
 ## Origins of this work

@@ -5,8 +5,13 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from hamsclientfork.client import StationType
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfVolumetricFlux
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
@@ -14,6 +19,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from custom_components.meteoswiss import MeteoSwissDataUpdateCoordinator
 from custom_components.meteoswiss.const import (
+    CONF_FORECAST_NAME,
     CONF_POSTCODE,
     CONF_PRECIPITATION_STATION,
     CONF_REAL_TIME_NAME,
@@ -27,6 +33,7 @@ from custom_components.meteoswiss.const import (
     SENSOR_TYPE_UNIT,
     SENSOR_TYPES,
 )
+from custom_components.meteoswiss.radar import MeteoSwissRadarCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +46,10 @@ async def async_setup_entry(
     """Set up all sensors."""
     _LOGGER.debug("Starting async setup platform for sensor")
     c: MeteoSwissDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+
+    async_add_entities(
+        [MeteoSwissRadarSensor(entry.entry_id, c.data[CONF_FORECAST_NAME], c.radar)]
+    )
 
     if c.weather_station:
         async_add_entities(
@@ -160,3 +171,39 @@ class MeteoSwissSensor(
         """Handle data update."""
         self._data = self.coordinator.data
         self.async_write_ha_state()
+
+
+class MeteoSwissRadarSensor(
+    CoordinatorEntity[MeteoSwissRadarCoordinator],
+    SensorEntity,
+):
+    """Rain rate from the MeteoSwiss weather radar at the configured location."""
+
+    _attr_attribution = "Source: MeteoSwiss"
+    _attr_device_class = SensorDeviceClass.PRECIPITATION_INTENSITY
+    _attr_icon = "mdi:radar"
+    _attr_native_unit_of_measurement = UnitOfVolumetricFlux.MILLIMETERS_PER_HOUR
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        integration_id: str,
+        forecast_name: str,
+        coordinator: MeteoSwissRadarCoordinator,
+    ):
+        super().__init__(coordinator)
+        self._attr_unique_id = f"sensor.{integration_id}-radar-precipitation"
+        self._attr_name = f"{forecast_name} radar precipitation"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.rate
+
+    @property
+    def extra_state_attributes(self) -> dict[str, typing.Any] | None:
+        if self.coordinator.data is None:
+            return None
+        # End of the 5-minute interval the reading covers.
+        return {"observation_time": self.coordinator.data.time.isoformat()}
