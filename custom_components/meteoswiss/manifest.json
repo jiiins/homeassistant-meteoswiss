@@ -13,6 +13,8 @@
     "requirements": [
         "hamsclientfork>=0.2.20",
         "geopy>=2.0",
+        "numpy>=2",
+        "Pillow>=10.1",
         "pyfive>=1.0"
     ],
     "version": "1.4.0"

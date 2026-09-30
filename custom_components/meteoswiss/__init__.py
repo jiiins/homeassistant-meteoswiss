@@ -35,7 +35,7 @@ from custom_components.meteoswiss.const import (
 from custom_components.meteoswiss.radar import MeteoSwissRadarCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = [Platform.SENSOR, Platform.WEATHER]
+PLATFORMS = [Platform.IMAGE, Platform.SENSOR, Platform.WEATHER]
 MAX_CONTINUOUS_ERROR_TIME = 60 * 60
 
 

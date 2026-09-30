@@ -247,6 +247,15 @@ class MeteoSwissRadarCoordinator(DataUpdateCoordinator[dict[str, RadarReading]])
         # Daily items fetched during the current update, shared by the
         # products of one collection.
         self._items: dict[tuple[str, str], asyncio.Task[dict[str, typing.Any]]] = {}
+        # The newest rain image, kept for the radar loop.
+        self._latest_rain: tuple[datetime.datetime, bytes] | None = None
+        # The radar loop: the rain around the location per interval, the
+        # base map under it, and the rendered animation.
+        self._loop_frames: dict[datetime.datetime, typing.Any] = {}
+        self._loop_map: typing.Any = None
+        self._loop_task: asyncio.Task[None] | None = None
+        self.loop_image: bytes | None = None
+        self.loop_updated: datetime.datetime | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -347,8 +356,67 @@ class MeteoSwissRadarCoordinator(DataUpdateCoordinator[dict[str, RadarReading]])
                 raise UpdateFailed(f"Cannot read radar {key}: {exc}") from exc
             if value is not None:
                 value = round(value * product.scale, 2)
+            if key == PRECIPITATION:
+                self._latest_rain = (slot, content)
             return RadarReading(time=slot, value=value)
         return fresh
+
+    async def _update_loop(self) -> None:
+        """Rebuild the radar loop around the newest rain image."""
+        from custom_components.meteoswiss import radar_loop
+
+        assert self._latest_rain is not None
+        newest, content = self._latest_rain
+        now = dt_util.utcnow()
+        wanted = [newest - SLOT * k for k in range(radar_loop.FRAMES)]
+        box = None
+        for slot in wanted:
+            if slot in self._loop_frames and box is not None:
+                continue
+            # Older frames are only needed after a restart or a gap.
+            image = (
+                content
+                if slot == newest
+                else await self._fetch_image(
+                    PRECIPITATION, PRODUCTS[PRECIPITATION], slot, now
+                )
+            )
+            if image is None:
+                continue
+            rate, box = await self.hass.async_add_executor_job(
+                radar_loop.crop_around, image, self.lat, self.lon
+            )
+            self._loop_frames[slot] = rate
+        self._loop_frames = {s: f for s, f in self._loop_frames.items() if s in wanted}
+
+        base = self._loop_map
+        if base is None and box is not None:
+            try:
+                map_png = await self._fetch(radar_loop.basemap_url(box))
+            except (TimeoutError, aiohttp.ClientError) as exc:
+                _LOGGER.debug("Cannot fetch the radar loop's base map: %s", exc)
+                map_png = None
+            base = await self.hass.async_add_executor_job(
+                radar_loop.prepare_basemap, map_png
+            )
+            # A blank stand-in is not kept, so the map is tried again.
+            if map_png:
+                self._loop_map = base
+        if base is None:
+            return
+
+        frames = sorted(self._loop_frames.items())
+        self.loop_image = await self.hass.async_add_executor_job(
+            radar_loop.render_loop, frames, base, self.hass.config.time_zone
+        )
+        self.loop_updated = dt_util.utcnow()
+        self.async_update_listeners()
+
+    async def _update_loop_safely(self) -> None:
+        try:
+            await self._update_loop()
+        except Exception:
+            _LOGGER.exception("Cannot update the radar loop")
 
     async def _async_update_data(self) -> dict[str, RadarReading]:
         """Return a fresh reading per product, downloading only new images."""
@@ -376,4 +444,17 @@ class MeteoSwissRadarCoordinator(DataUpdateCoordinator[dict[str, RadarReading]])
             if errors:
                 raise UpdateFailed(str(errors[0]))
             raise UpdateFailed("No fresh radar image for any product")
+
+        # The loop is rebuilt in the background, so a slow base map or
+        # render never holds up the sensors.
+        rain = data.get(PRECIPITATION)
+        if (
+            rain is not None
+            and self._latest_rain is not None
+            and rain.time not in self._loop_frames
+            and (self._loop_task is None or self._loop_task.done())
+        ):
+            self._loop_task = self.hass.async_create_background_task(
+                self._update_loop_safely(), f"{DOMAIN} radar loop"
+            )
         return data
